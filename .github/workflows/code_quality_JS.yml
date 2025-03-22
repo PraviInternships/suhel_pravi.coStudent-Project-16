@@ -1,0 +1,186 @@
+name: Code Quality (JavaScript)
+'on':
+  push:
+    paths:
+      - '**/*.js'
+      - '**/*.jsx'
+  pull_request:
+    paths:
+      - '**/*.js'
+      - '**/*.jsx'
+  workflow_dispatch:
+    inputs:
+      custom_username:
+        description: Enter custom username (default is "default-user")
+        required: false
+        default: default-user
+      project_id:
+        description: Enter project ID (default is "default-project")
+        required: false
+        default: default-project
+jobs:
+  lint:
+    name: Run ESLint and Generate Quality Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install Dependencies
+        run: >
+          npm install eslint eslint-plugin-react eslint-formatter-html
+          --save-dev
+
+          if ! grep -q '"lint":' package.json; then
+            jq '.scripts += {"lint": "eslint \"**/*.{js,jsx}\""}' package.json > temp.json && mv temp.json package.json
+          fi
+      - name: Create ESLint Config File
+        run: |
+          echo 'module.exports = [
+            {
+              files: ["**/*.{js,jsx}"],
+              ignores: ["coverage/", "node_modules/"],
+              rules: {
+                "no-unused-vars": "warn",
+                "no-console": "off",
+                "react/prop-types": "off"
+              },
+              languageOptions: {
+                ecmaVersion: "latest",
+                sourceType: "module",
+                parserOptions: {
+                  ecmaFeatures: { jsx: true }
+                }
+              },
+              plugins: {
+                react: require("eslint-plugin-react")
+              }
+            }
+          ];' > eslint.config.js
+      - name: Validate ESLint Config
+        run: |
+          if [ ! -f eslint.config.js ]; then
+            echo "ESLint config file not found. Exiting..."
+            exit 1
+          fi
+      - name: Run ESLint and Generate HTML Report
+        run: >
+          # Run ESLint using the "lint" script and output to an HTML file
+
+          npm run lint -- --config eslint.config.js --format html --output-file
+          eslint-report.html || {
+            echo "ESLint failed. Printing debug info...";
+            exit 1;
+          }
+      - name: Calculate Quality Score
+        run: >
+          # Define a function to calculate quality score
+
+          calculate_quality_score() {
+            local error_count=$1
+            local statement_count=$2
+
+            if [ "$statement_count" -eq 0 ]; then
+              echo "No statements found in the codebase. Setting quality score to 0."
+              echo 0
+            else
+              awk "BEGIN {printf \"%.2f\", 10.0 - ((5 * $error_count / $statement_count) * 10)}"
+            fi
+          }
+
+
+          # Extract the number of convention errors from the ESLint HTML report
+
+          ERROR_COUNT=$(grep -o 'class="error"' eslint-report.html | wc -l)
+
+
+          # Count the number of statements (semi-colons) in JavaScript files
+
+          STATEMENT_COUNT=$(find . -name "*.js" -o -name "*.jsx" -exec cat {} +
+          | grep -o ";" | wc -l)
+
+
+          # Calculate the quality score
+
+          QUALITY_SCORE=$(calculate_quality_score "$ERROR_COUNT"
+          "$STATEMENT_COUNT")
+
+
+          # Print and set the quality score as an environment variable
+
+          echo "Quality Score: $QUALITY_SCORE"
+
+          echo "quality_score=$QUALITY_SCORE" >> $GITHUB_ENV
+      - name: Append Quality Score to HTML Report
+        run: |
+          QUALITY_SCORE=${{ env.quality_score }}
+          echo "<h2>Quality Score: $QUALITY_SCORE</h2>" >> eslint-report.html
+      - name: Create `docs/` Folder and Replace User Folder with New Report
+        run: >
+          USERNAME="${{ github.event.inputs.custom_username || 'default-user'
+          }}"
+
+          PROJECT_ID="${{ github.event.inputs.project_id || 'default-project'
+          }}"
+
+          DOCS_FOLDER="docs/$USERNAME"
+
+          mkdir -p "$DOCS_FOLDER"
+
+
+          if [ -f "eslint-report.html" ]; then
+            mv eslint-report.html "$DOCS_FOLDER/"
+          else
+            echo "ESLint report not found. Exiting."
+            exit 1
+          fi
+      - name: Upload ESLint Report as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-report
+          path: >-
+            docs/${{ github.event.inputs.custom_username || 'default-user'
+            }}/eslint-report.html
+      - name: Commit and Push Updated Report to GitHub Pages
+        run: >
+          git config user.name "GitHub Actions"
+
+          git config user.email "actions@github.com"
+
+
+          if [ -f "docs/${{ github.event.inputs.custom_username ||
+          'default-user' }}/eslint-report.html" ]; then
+            git add docs/${{ github.event.inputs.custom_username || 'default-user' }}/eslint-report.html
+            git commit -m "Update ESLint report with Quality Score for ${{ github.event.inputs.custom_username || 'default-user' }}"
+            git push origin main --force
+          else
+            echo "No report to commit. Skipping."
+          fi
+      - name: Call API to Insert Quality Score
+        run: >
+          API_URL="https://dolphin-app-uzion.ondigitalocean.app/api/setQuality?clientpublic=baef7468287a44d8ac3634026d9fb8d1&clientsecret=181a2f3171117c1bd164c88b1171c1b83114fc1712121b12"
+
+          USER_ID="${{ github.event.inputs.custom_username || 'default-user' }}"
+
+          PROJECT_ID="${{ github.event.inputs.project_id || 'default-project'
+          }}"
+
+          LAST_REQUEST_TIME="$(date +%s)000"
+
+
+          curl -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"userid\": \"$USER_ID\",
+              \"clientpublic\": \"$CLIENT_PUBLIC\",
+              \"clientsecret\": \"$CLIENT_SECRET\",
+              \"projectid\": \"$PROJECT_ID\",
+              \"recordtime\": \"$LAST_REQUEST_TIME\",
+              \"quality\": \"${{ env.quality_score }}\",
+              \"coverage\": \"${{ env.quality_score }}\"
+            }"
