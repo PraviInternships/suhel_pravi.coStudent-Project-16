@@ -1,0 +1,150 @@
+name: Code Quality (C)
+'on':
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.c'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**/*.c'
+  workflow_dispatch:
+    inputs:
+      custom_username:
+        description: Enter custom username (default is "default-user")
+        required: false
+        default: default-user
+      project_id:
+        description: Enter project ID (default is "default-project")
+        required: false
+        default: default-project
+jobs:
+  lint:
+    name: Lint C Codebase
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Install Cppcheck and Dependencies
+        run: >
+          sudo apt-get update
+
+          sudo apt-get install -y cppcheck libxml2-utils # Install libxml2-utils
+          for xmllint
+      - name: Run Cppcheck and Generate XML Report
+        run: >
+          cppcheck --enable=all --inconclusive --xml . 2> cppcheck-report.xml ||
+          true
+
+
+          if [ ! -s cppcheck-report.xml ]; then
+            echo "<errors>No issues found by Cppcheck.</errors>" > cppcheck-report.xml
+          fi
+      - name: Generate HTML Report from XML
+        run: >
+          cppcheck-htmlreport --file=cppcheck-report.xml
+          --report-dir=cppcheck_reports --source-dir=. || true
+      - name: Calculate Quality Score
+        id: calculate_score
+        run: >
+          ERROR_COUNT=$(xmllint --xpath "count(//error[@severity='error'])"
+          cppcheck-report.xml)
+
+          WARNING_COUNT=$(xmllint --xpath "count(//error[@severity='warning'])"
+          cppcheck-report.xml)
+
+          CONVENTIONS_COUNT=$(xmllint --xpath
+          "count(//error[@severity='style'])" cppcheck-report.xml)
+
+
+          LLOC=$((ERROR_COUNT + WARNING_COUNT + CONVENTIONS_COUNT))
+
+
+          if [ "$LLOC" -eq 0 ]; then
+            echo "No logical lines of code found. Setting quality score to 0."
+            QUALITY_SCORE=0
+          else
+            QUALITY_SCORE=$(awk "BEGIN {printf \"%.2f\", ((5 * $ERROR_COUNT + $WARNING_COUNT + $CONVENTIONS_COUNT) / $LLOC) * 10 -10.0}")
+          fi
+
+
+          echo "Quality Score: $QUALITY_SCORE"
+
+          echo "quality_score=$QUALITY_SCORE" >> $GITHUB_ENV
+      - name: Move Cppcheck Reports to docs/
+        run: >
+          USERNAME="${{ github.event.inputs.custom_username || 'default-user'
+          }}"
+
+          PROJECT_ID="${{ github.event.inputs.project_id || 'default-project'
+          }}"
+
+
+          DOCS_FOLDER="docs/${USERNAME}/${PROJECT_ID}/code_quality"
+
+
+          mkdir -p "$DOCS_FOLDER"
+
+
+          if [ -d "cppcheck_reports" ]; then
+            mv cppcheck_reports/* "$DOCS_FOLDER/"
+          else
+            echo "No HTML report found. Exiting."
+            exit 1
+          fi
+      - name: Upload Cppcheck HTML Report as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-html-report
+          path: >-
+            docs/${{ github.event.inputs.custom_username || 'default-user'
+            }}/${{ github.event.inputs.project_id || 'default-project' }}/
+      - name: Commit and Push Cppcheck Reports to GitHub Pages
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: >
+          git config user.name "GitHub Actions"
+
+          git config user.email "actions@github.com"
+
+
+          # Add and commit the cppcheck reports
+
+          git add docs/${{ github.event.inputs.custom_username || 'default-user'
+          }}/${{ github.event.inputs.project_id || 'default-project' }}/
+
+          git commit -m "Update Cppcheck report for ${{
+          github.event.inputs.custom_username || 'default-user' }} and project
+          ${{ github.event.inputs.project_id || 'default-project' }}"
+
+
+          # Push the changes to GitHub Pages
+
+          git push https://x-access-token:${GH_PAT}@github.com/${{
+          github.repository }} main --force
+      - name: Call API to Insert Quality Score
+        run: >
+          API_URL="https://dolphin-app-uzion.ondigitalocean.app/api/setQuality?clientpublic=baef7468287a44d8ac3634026d9fb8d1&clientsecret=181a2f3171117c1bd164c88b1171c1b83114fc1712121b12"
+
+          USER_ID="${{ github.event.inputs.custom_username || 'default-user' }}"
+
+          PROJECT_ID="${{ github.event.inputs.project_id || 'default-project'
+          }}"
+
+          LAST_REQUEST_TIME="$(date +%s)000"
+
+          curl -X POST "$API_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"userid\": \"$USER_ID\",
+              \"clientpublic\": \"baef7468287a44d8ac3634026d9fb8d1\",
+              \"clientsecret\": \"181a2f3171117c1bd164c88b1171c1b83114fc1712121b12\",
+              \"projectid\": \"$PROJECT_ID\",
+              \"recordtime\": \"$LAST_REQUEST_TIME\",
+              \"quality\": \"${{ env.quality_score }}\",
+              \"coverage\": \"${{ env.quality_score }}\"
+            }"
